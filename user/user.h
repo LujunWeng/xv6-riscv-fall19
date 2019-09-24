@@ -31,6 +31,8 @@ int umount(char*);
 // ulib.c
 int stat(const char*, struct stat*);
 char* strcpy(char*, const char*);
+char* safestrcpy(char *, const char*, int);
+char* strncpy(char*, const char*, int);
 void *memmove(void*, const void*, int);
 char* strchr(const char*, char c);
 int strcmp(const char*, const char*);
