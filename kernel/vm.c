@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -16,6 +18,53 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 extern char trampoline[]; // trampoline.S
 
 void print(pagetable_t);
+
+void _vmprint(pagetable_t pagetable, int level)
+{
+  for (int i = 0; i < 512; ++i) {
+    pte_t pte = pagetable[i];
+    if (pte & PTE_V) {
+      for (int j = 0; j <= level; ++j) {
+        printf(" ..");
+      }
+      printf("%d: pte %p pa %p\n", i, pte, (pagetable_t)PTE2PA(pte));
+
+      if (level < 2)
+        _vmprint((pagetable_t)PTE2PA(pte), level+1);
+    }
+  }
+}
+
+/*
+ * Print the whole page table
+ */
+void vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  _vmprint(pagetable, 0);
+}
+
+void vapath(pagetable_t pagetable, uint64 va)
+{
+  printf("va %p->", va);
+  pte_t* p = pagetable + PX(2, va);
+  printf("(%p, %p)", p, *p);
+  if (!(*p & PTE_V))
+    goto finish;
+
+  p = (pagetable_t)PTE2PA(*p) + PX(1, va);
+  printf("->(%p, %p)", p, *p);
+  if (!(*p & PTE_V))
+    goto finish;
+
+  p = (pagetable_t)PTE2PA(*p) + PX(0, va);
+  printf("->(%p, %p)", p, *p);
+  if (!(*p & PTE_V))
+    goto finish;
+
+finish:
+  printf("\n");
+}
 
 /*
  * create a direct-map page table for the kernel and
@@ -96,7 +145,7 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
 }
 
 // Look up a virtual address, return the physical address,
-// or 0 if not mapped.
+// or 0 if not mapped (really not mapped, not because of lazy allocation).
 // Can only be used to look up user pages.
 uint64
 walkaddr(pagetable_t pagetable, uint64 va)
@@ -108,10 +157,24 @@ walkaddr(pagetable_t pagetable, uint64 va)
     return 0;
 
   pte = walk(pagetable, va, 0);
-  if(pte == 0)
-    return 0;
-  if((*pte & PTE_V) == 0)
-    return 0;
+  if (pte == 0 || (*pte & PTE_V) == 0) {
+    struct proc* p = myproc();
+    if (va >= p->sz) {
+      return 0;
+    }
+
+    void* mem = kalloc();
+    if (mem == 0) return 0;
+
+    memset(mem, 0, PGSIZE);
+    if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0) {
+      kfree(mem);
+      return 0;
+    }
+
+    return (uint64)mem;
+  }
+
   if((*pte & PTE_U) == 0)
     return 0;
   pa = PTE2PA(*pte);
@@ -163,8 +226,11 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   for(;;){
     if((pte = walk(pagetable, a, 1)) == 0)
       return -1;
-    if(*pte & PTE_V)
-      panic("remap");
+    if(*pte & PTE_V) {
+      vmprint(pagetable);
+      vapath(pagetable, va);
+      panic("manpages: remap");
+    }
     *pte = PA2PTE(pa) | perm | PTE_V;
     if(a == last)
       break;
@@ -186,25 +252,22 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 size, int do_free)
 
   a = PGROUNDDOWN(va);
   last = PGROUNDDOWN(va + size - 1);
-  for(;;){
-    if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
-    if((*pte & PTE_V) == 0){
-      printf("va=%p pte=%p\n", a, *pte);
-      panic("uvmunmap: not mapped");
+  for (;;) {
+    pte = walk(pagetable, a, 0);
+
+    if ((pte != 0) && (*pte & PTE_V)) {
+      if (PTE_FLAGS(*pte) == PTE_V)
+        panic("uvmunmap: not a leaf");
+      if (do_free) {
+        pa = PTE2PA(*pte);
+        kfree((void*)pa);
+      }
+      *pte = 0; 
     }
-    if(PTE_FLAGS(*pte) == PTE_V)
-      panic("uvmunmap: not a leaf");
-    if(do_free){
-      pa = PTE2PA(*pte);
-      kfree((void*)pa);
-    }
-    *pte = 0;
-    if(a == last)
+    if (a == last)
       break;
-    a += PGSIZE;
-    pa += PGSIZE;
-  }
+    a += PGSIZE; 
+  } 
 }
 
 // create an empty user page table.
@@ -232,7 +295,7 @@ uvminit(pagetable_t pagetable, uchar *src, uint sz)
   mem = kalloc();
   memset(mem, 0, PGSIZE);
   mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
-  memmove(mem, src, sz);
+  memmove(mem, src, sz);    // Why physical address is used here?
 }
 
 // Allocate PTEs and physical memory to grow process from oldsz to
@@ -251,7 +314,7 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
   for(; a < newsz; a += PGSIZE){
     mem = kalloc();
     if(mem == 0){
-      uvmdealloc(pagetable, a, oldsz);
+      uvmdealloc(pagetable, a, oldsz);   // Fallback previous allocations
       return 0;
     }
     memset(mem, 0, PGSIZE);
@@ -295,6 +358,7 @@ freewalk(pagetable_t pagetable)
       freewalk((pagetable_t)child);
       pagetable[i] = 0;
     } else if(pte & PTE_V){
+      printf("freewalk: leaf: *pte %p pte %p\n", pagetable + i, pte);
       panic("freewalk: leaf");
     }
   }
@@ -325,10 +389,10 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+    pte = walk(old, i, 0);
+    if ((pte == 0) || (*pte & PTE_V) == 0)
+      continue;
+
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
