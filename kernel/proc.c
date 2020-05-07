@@ -123,6 +123,11 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // Periodic handler
+  p->nticks  = 0;
+  p->xticks  = 0;
+  p->handler = 0;
+
   return p;
 }
 
