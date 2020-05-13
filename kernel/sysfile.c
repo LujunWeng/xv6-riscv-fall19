@@ -322,6 +322,29 @@ sys_open(void)
     return -1;
   }
 
+  if (ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)) {
+    int depth = 0;
+    while (ip->type == T_SYMLINK) {
+      if (depth == MAXSYMDEPTH) {
+        iunlockput(ip);
+        end_op(ROOTDEV);
+        return -1;
+      }
+
+      char target[MAXPATH];
+      if ((n = readi(ip, 0, (uint64)target, 0, MAXPATH-1)) < 0)
+        panic("sys_open: read failed for symbolic file");
+      target[n] = 0;
+      iunlockput(ip);
+      if ((ip = namei(target)) == 0) {
+        end_op(ROOTDEV);
+        return -1;
+      }
+      ilock(ip);
+      ++depth;
+   }
+  }
+
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
@@ -480,6 +503,32 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH];
+  char path[MAXPATH];
+  struct inode *ip;
+  uint target_len;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+  target_len = strlen(target);
+
+  begin_op(ROOTDEV);
+  ip = create(path, T_SYMLINK, 0, 0);
+  if (ip == 0) {
+    end_op(ROOTDEV);
+    return -1;
+  } 
+  if (writei(ip, 0, (uint64)target, 0, target_len) != target_len)
+    panic("sys_symlink: failed to write target");    
+
+  iunlockput(ip);
+  end_op(ROOTDEV);
   return 0;
 }
 
