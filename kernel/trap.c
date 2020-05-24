@@ -3,8 +3,12 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
 #include "proc.h"
 #include "defs.h"
+#include "memmap.h"
+#include "fs.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -71,9 +75,45 @@ usertrap(void)
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
-    printf("usertrap(): unexpected scause %p (%s) pid=%d\n", r_scause(), scause_desc(r_scause()), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    p->killed = 1;
+    uint64 va = r_stval();
+    if (va >= p->vma_start && va < TRAPFRAME) {
+      printf("%p, mmap-trap: %p + %p\n", p, va, va+PGSIZE);
+      // memory-mapping
+      char *mem = kalloc();
+      if (mem == 0)
+        panic("memmap: failed to allocate a physical page");
+      memset(mem, 0, PGSIZE);
+
+      struct vma *vp;
+      if ((vp = mmap_find_vma(va)) == 0)
+        panic("memmap: not in any vma");
+      acquiresleep(&vp->lock); 
+
+      // read file
+      struct file *f = vp->fp;
+      ilock(f->ip);
+      int offset = vp->offset + (PGROUNDDOWN(va) - vp->addr);
+      int nb = f->ip->size - offset; 
+      nb = nb <= PGSIZE ? nb : PGSIZE;
+      if (readi(f->ip, 0, (uint64)mem, vp->offset, nb) < nb)
+        panic("memmap: failed to read enough bytes");
+      iunlock(f->ip);    
+      
+      printf("memmap-trap: %p:%p , %p:%p\n", va, *mem, va+nb-1, *(mem+nb-1)); 
+      int perm = PTE_U | PTE_X;  
+      if (vp->prot & PROT_WRITE)
+        perm |= PTE_W;
+      if (vp->prot & PROT_READ)
+        perm |= PTE_R;
+      if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, perm) < 0)
+        panic("memmap: failed to map a page");
+
+      releasesleep(&vp->lock);
+    } else {
+      printf("usertrap(): unexpected scause %p (%s) pid=%d\n", r_scause(), scause_desc(r_scause()), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    }
   }
 
   if(p->killed)

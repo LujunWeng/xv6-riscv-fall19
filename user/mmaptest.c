@@ -4,6 +4,8 @@
 #include "kernel/stat.h"
 #include "kernel/riscv.h"
 #include "kernel/fs.h"
+#include "kernel/spinlock.h"
+#include "kernel/sleeplock.h"
 #include "kernel/memmap.h"
 #include "user/user.h"
 
@@ -41,7 +43,7 @@ _v1(char *p)
   for (i = 0; i < PGSIZE*2; i++) {
     if (i < PGSIZE + (PGSIZE/2)) {
       if (p[i] != 'A') {
-        printf("mismatch at %d, wanted 'A', got 0x%x\n", i, p[i]);
+        printf("mismatch at %p:%d, wanted 'A', got 0x%x\n", p+i, i, p[i]);
         err("v1 mismatch (1)");
       }
     } else {
@@ -130,6 +132,7 @@ mmap_test(void)
   if (munmap(p, PGSIZE*2) == -1)
     err("munmap (2)");
 
+  printf("pass 2\n"); 
   // check that mmap doesn't allow read/write mapping of a
   // file opened read-only.
   if ((fd = open(f, O_RDONLY)) == -1)

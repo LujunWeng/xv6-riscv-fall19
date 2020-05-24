@@ -7,6 +7,7 @@
 #include "fs.h"
 #include "file.h"
 #include "defs.h"
+#include "memmap.h"
 
 volatile static int started = 0;
 
@@ -24,6 +25,7 @@ main()
     kvminit();       // create kernel page table
     kvminithart();   // turn on paging
     procinit();      // process table
+    mmapinit();      // init memory-mapping feature
     trapinit();      // trap vectors
     trapinithart();  // install kernel trap vector
     plicinit();      // set up interrupt controller

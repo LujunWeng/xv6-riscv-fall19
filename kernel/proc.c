@@ -8,6 +8,7 @@
 #include "file.h"
 #include "proc.h"
 #include "defs.h"
+#include "memmap.h"
 
 struct cpu cpus[NCPU];
 
@@ -113,6 +114,9 @@ found:
     release(&p->lock);
     return 0;
   }
+
+  // Set vma region
+  p->vma_start = TRAPFRAME; 
 
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
@@ -276,15 +280,36 @@ fork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
-
+ 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
-
+  np->vma_start = p->vma_start;
+  
   np->state = RUNNABLE;
-
   release(&np->lock);
-
+  // copy memory-mapped regions
+  for (struct vma *vp = vmas; vp < &vmas[NVMA]; ++vp) {
+    acquiresleep(&vp->lock);
+    if (vp->refcnt > 0 && vp->pc == p) {
+      struct vma vcopy = *vp;
+      releasesleep(&vp->lock);    
+      struct vma *nvp = mmap_alloc_vma(); 
+      acquiresleep(&nvp->lock);
+      printf("mmap-fork: copy %p + %d = %p\n", vcopy.addr, vcopy.len, vcopy.addr + vcopy.len);
+      nvp->addr = vcopy.addr;
+      nvp->len  = vcopy.len;
+      nvp->prot = vcopy.prot;
+      nvp->flags = vcopy.flags;
+      nvp->fp   = vcopy.fp;
+      nvp->offset = vcopy.offset;
+      nvp->pc = np;
+      filedup(nvp->fp);
+      releasesleep(&nvp->lock);
+    } else {
+      releasesleep(&vp->lock);    
+    }
+  }
   return pid;
 }
 
@@ -324,6 +349,15 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // Unmap memory
+  for (struct vma *vp = vmas; vp < &vmas[NVMA]; ++vp) {
+    acquiresleep(&vp->lock);
+    if (vp->refcnt > 0 && vp->pc == p) {
+      mmap_unmap(vp, vp->addr, vp->len);
+    }
+    releasesleep(&vp->lock);    
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
