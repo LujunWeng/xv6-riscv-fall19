@@ -96,7 +96,7 @@ int
 e1000_transmit(struct mbuf *m)
 {
   acquire(&e1000_lock);
-
+  
   int i = regs[E1000_TDT];
 
   // overflow
@@ -115,9 +115,10 @@ e1000_transmit(struct mbuf *m)
     mbuffree(tx_mbufs[i]);
   tx_ring[i].addr = (uint64) m->head;
   tx_ring[i].length = m->len;
-  tx_ring[i].cmd |= E1000_TXD_CMD_RS;  
+  tx_ring[i].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;  
   tx_mbufs[i] = m;
   
+  // printf("e1000_transmit: %d - %d: %p - %p - %d\n", regs[E1000_TDH], i, m->buf, m->head, m->len); 
   regs[E1000_TDT] = (i + 1) % TX_RING_SIZE;
 
   release(&e1000_lock);
@@ -127,26 +128,31 @@ e1000_transmit(struct mbuf *m)
 static void
 e1000_recv(void)
 {
-  acquire(&e1000_lock);
+  struct mbuf *mp;
+
   int i = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
-  if (!(rx_ring[i].status & E1000_RXD_STAT_DD)) {
+  int n = regs[E1000_RDH];
+  while (i != n) {
+    acquire(&e1000_lock);
+    if (!(rx_ring[i].status & E1000_RXD_STAT_DD)) {
+      release(&e1000_lock);
+      return;
+    }
+    mbufput(rx_mbufs[i], rx_ring[i].length);
+    // printf("e1000_recv: %d, %d, %p\n", i, regs[E1000_RDH], rx_mbufs[i]);
+    mp = rx_mbufs[i];
+    rx_mbufs[i] = mbufalloc(0);
+    if (!rx_mbufs[i])
+      panic("e1000");
+    rx_ring[i].addr = (uint64) rx_mbufs[i]->head;
+    rx_ring[i].status = 0;
+    regs[E1000_RDT] = i;
     release(&e1000_lock);
-    return;
+
+    net_rx(mp);
+    i = i + 1;
   }
-  mbufput(rx_mbufs[i], rx_ring[i].length);
-  printf("e1000_recv: %d, %p\n", i, rx_mbufs[i]);
-  release(&e1000_lock);
-  
-  net_rx(rx_mbufs[i]);
-  
-  acquire(&e1000_lock);
-  rx_mbufs[i] = mbufalloc(0);
-  if (!rx_mbufs[i])
-     panic("e1000");
-  rx_ring[i].addr = (uint64) rx_mbufs[i]->head;
-  rx_ring[i].status = 0;
-  regs[E1000_RDT] = i;
-  release(&e1000_lock);
+  // printf("e1000_recv: leave %d - %d\n", i, n);
 }
 
 void

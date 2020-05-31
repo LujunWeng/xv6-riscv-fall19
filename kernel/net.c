@@ -276,7 +276,6 @@ net_rx_arp(struct mbuf *m)
   memmove(smac, arphdr->sha, ETHADDR_LEN); // sender's ethernet address
   sip = ntohl(arphdr->sip); // sender's IP address (qemu's slirp)
   net_tx_arp(ARP_OP_REPLY, smac, sip);
-
 done:
   mbuffree(m);
 }
@@ -365,10 +364,11 @@ void net_rx(struct mbuf *m)
   }
 
   type = ntohs(ethhdr->type);
-  if (type == ETHTYPE_IP)
+  if (type == ETHTYPE_IP) {
     net_rx_ip(m);
-  else if (type == ETHTYPE_ARP)
+  } else if (type == ETHTYPE_ARP) {
     net_rx_arp(m);
-  else
+  } else {
     mbuffree(m);
+  }
 }

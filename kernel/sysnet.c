@@ -1,4 +1,3 @@
-//
 // network system calls.
 //
 
@@ -80,23 +79,101 @@ bad:
   return -1;
 }
 
-//
-// Your code here.
-//
-// Add and wire in methods to handle closing, reading,
-// and writing for network sockets.
-//
+void sockclose(struct sock *si)
+{
+  if (!si)
+    return;
+
+  acquire(&lock);
+  if (si == sockets) {
+    sockets = si->next;
+  } else {
+    struct sock *p;
+    for (p = sockets; p; p = p->next)
+      if (p->next == si)
+        break;
+    if (!p) {
+      release(&lock);
+      return;
+    }
+    p->next = si->next;
+  }
+  
+  while (!mbufq_empty(&si->rxq)) {
+    mbuffree(mbufq_pophead(&si->rxq));
+  }
+  release(&lock);
+
+  kfree((char *)si);    
+}
+
+int sockread(struct sock *si, uint64 addr, int n)
+{
+  struct proc *pr = myproc();
+
+  acquire(&si->lock);
+  while (mbufq_empty(&si->rxq)) {
+    if (pr->killed) {
+      release(&si->lock);
+      return -1;
+    }
+    // printf("sleep\n");
+    sleep(&si->lport, &si->lock);
+    // printf("back\n");
+  }
+
+  int cnt = 0;
+  // For UDP, a packer per time.
+  if (si->rxq.head->len <= n) {
+    struct mbuf *mp = si->rxq.head;
+    if (copyout(pr->pagetable, addr, mp->head, mp->len) != -1) {
+      cnt = mp->len;
+      mbuffree(mbufq_pophead(&si->rxq));
+    }
+  }
+  release(&si->lock);
+
+  return cnt;
+}
+
+int sockwrite(struct sock *si, uint64 addr, int n)
+{
+  struct proc *pr = myproc();
+  struct mbuf *mp = mbufalloc(MBUF_DEFAULT_HEADROOM);
+  if (copyin(pr->pagetable, mp->head, addr, n) == -1)
+    return -1;  
+  mbufput(mp, n);
+  // printf("sockwrite: %s\n", mp->head);  
+  acquire(&si->lock);
+  net_tx_udp(mp, si->raddr, si->lport, si->rport);
+  release(&si->lock);
+  return n;
+}
 
 // called by protocol handler layer to deliver UDP packets
 void
 sockrecvudp(struct mbuf *m, uint32 raddr, uint16 lport, uint16 rport)
 {
-  //
-  // Your code here.
-  //
-  // Find the socket that handles this mbuf and deliver it, waking
-  // any sleeping reader. Free the mbuf if there are no sockets
-  // registered to handle it.
-  //
-  mbuffree(m);
+  struct sock *si;
+
+  acquire(&lock);
+  for (si = sockets; si; si = si->next) {
+    if (si->lport == lport &&
+        si->raddr == raddr &&
+        si->rport == rport) {
+      break;
+    }
+  }
+  release(&lock);
+
+  if (!si) {
+    mbuffree(m);
+    return;
+  }
+  
+  acquire(&si->lock);
+  mbufq_pushtail(&si->rxq, m);
+  // printf("recvup: %s\n", m->head);
+  wakeup(&si->lport);
+  release(&si->lock);
 }
